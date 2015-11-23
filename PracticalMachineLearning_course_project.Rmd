@@ -1,0 +1,139 @@
+---
+title: "Qualitative Activity Recognition of Weight Lifting Exercises"
+date: "20 November 2015"
+output: html_document
+---
+
+###Synopsis
+
+In this project, we will try to build a model that should be able to recognize the way exercises were performed based on data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The dataset is available here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). This site also provides a document partially describing the origin of certain variables in the dataset and the approach taken by a group of scientists to build a machine learning algorithm based on the dataset.
+
+###Exploratory data analysis
+
+Let's have a look at the dimensions and the structure of the dataset:
+```{r cache=TRUE}
+df <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+dim <- dim(df)
+print(dim)
+str(df, list.len = dim[2])
+```
+Let's summarize some observations on the variables in this dataset:
+
+1. **X** - just a sequence number
+2. **user_name** - participants names
+3. three **'timestamp'** variables - various representations of timestamps of when excercises were executed
+4. two **'window'** variables - according to the document provided on the site dataset was originally taken from, all observations were split into time windows of various length
+5. multiple raw accelerometer data variables
+6. several groups of aggregation variables ('min_', 'max_', 'avg_', 'skewness_', 'kurtosis_', etc.) apparently added to the dataset for each time window by scientists - the authors of the original dataset analysis
+7. **classe** - the outcome variable that represents 5 different classes - the 5 ways exercises were executed. The type of **classe** variable is factor which is what we need. 
+
+The first 7 variables as well as the added aggregation variables ('min', 'max', 'amplitude', 'stddev', 'kurtosis', 'skewness', 'var', 'avg') do not seem to be of interest for our future prediction model. Since we're only interested in the raw data, let's get rid of all variables apart from the raw accelerometer data and the outcome:
+
+```{r}
+# eliminate the first 7 variables
+df <- subset(df, select=-c(1:7))
+
+# eliminate all aggregation variables
+df <- subset(df, select=-grep("^min|^max|^amplitude|^stddev|^kurtosis|^skewness|^var|^avg", names(df)))
+```
+
+###Building a prediction model
+
+First, we'll split the **df** dataset into the training and the test datasets (60% - training, 40% - test). The training dataset will be used to build our model and the test dataset will be used to calculate the out-of-sample error later.
+
+```{r}
+library(caret, quietly = TRUE)
+inTrain <- createDataPartition(y=df$classe, p=0.6, list = FALSE)
+pml.training <- df[inTrain,]
+pml.testing <- df[-inTrain,]
+```
+
+Now let's find variables with highest absolute pairwise correlation in the training dataset (we'll assume correlation higher than 90%):
+```{r}
+# correlation matrix for all variables but the last one - the outcome - classe
+correlationMatrix <- cor(pml.training[1:ncol(pml.training)-1])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff = .90)
+print(names(pml.training)[highlyCorrelated])
+```
+
+Let's eliminate those variables from the training dataset:
+```{r}
+pml.training <- subset(pml.training, select = -highlyCorrelated)
+```
+
+and see how many variables are left in the training dataset now:
+```{r}
+ncol(pml.training)
+```
+
+Let's build three models now - a Random Forest model, a Boosted Tree model and a Support Vector Machines model. For all models we'll use the "cv" resampling method which is in fact a k-fold cross-validation (we'll use 5 folds). We'll then use each model to predict the **clasee** variable for each observation in the **pml.testing** dataset. Once complete, we will build a confusionMatrix for each model to see its performance. 
+Since building a model is a computationally intensive operation, we will use {doParallel} / {parallel} packages that take advantage of multiple CPU cores and execute computational operations in parallel.
+
+1. Random Forest model
+```{r cache=TRUE}
+library(doParallel, quietly = TRUE)
+# register doParallel to run subsequent operations on multiple CPU cores
+c1 <- makeCluster(detectCores())
+registerDoParallel(c1)
+# specify resampling method and its parameters
+trainControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+# train the model
+model.rf <- train(classe ~ ., data = pml.training, method = "rf", trControl = trainControl)
+# predict outcome values on the testing set
+predict.rf <- predict(model.rf, pml.testing)
+# build confusion matrix
+conf.matrix.rf <- confusionMatrix(predict.rf, pml.testing$classe)
+print(conf.matrix.rf)
+```
+
+2. Boosted tree model
+
+```{r cache=TRUE}
+model.gbm <- train(classe ~ ., data = pml.training, method = "gbm", trControl = trainControl, verbose = FALSE)
+
+predict.gbm <- predict(model.gbm, pml.testing)
+conf.matrix.gbm <- confusionMatrix(predict.gbm, pml.testing$classe)
+print(conf.matrix.gbm)
+```
+
+3. Support Vector Machines model
+
+```{r cache=TRUE}
+library(kernlab, quietly = TRUE)
+model.svm <- train(classe ~ ., data = pml.training, method = "svmRadial", trControl = trainControl, verbose = FALSE)
+
+predict.svm <- predict(model.svm, pml.testing)
+conf.matrix.svm <- confusionMatrix(predict.svm, pml.testing$classe)
+print(conf.matrix.svm)
+```
+
+Let's now compare the out-of-sample errors of each model. We will calculate the out-of-sample error as (1 - accuracy).
+
+```{r}
+
+ooe.rf <- 1 - conf.matrix.rf$overall[1]
+names(ooe.rf) <- NULL
+ooe.gbm <- 1 - conf.matrix.gbm$overall[1]
+names(ooe.gbm) <- NULL
+ooe.svm <- 1- conf.matrix.svm$overall[1]
+names(ooe.svm) <- NULL
+
+ooe.summary <- data.frame(out.of.sample.rf = round(ooe.rf,3), 
+                          out.of.sample.gbm = round(ooe.gbm, 3), 
+                          out.of.sample.svm = round(ooe.svm, 3))
+print(ooe.summary)
+```
+
+As we can see, the Random Forest model accuracy is the highest and the out-of-sample if the lowest of all three models so the Random Forest model is showing the best performance for our dataset and the selection of predictors.
+
+Finally let's see the importance of dataset variables for the Random Forest model: 
+```{r fig.cap="Variable importance", fig.width=8, fig.height=8}
+library(pROC, quietly = TRUE)
+library(randomForest, quietly = TRUE)
+plot(varImp(model.rf))
+```
+
+Let's serialize and save our Random Forest model object to a file so that later we can read it and use to calculate predicted **classe** values for the Submission part of the course project.
+```{r}
+saveRDS(model.rf, file = "model.rf.rds")
+```
